@@ -73,7 +73,7 @@ public:
             context(0),
             queue(0),
             syncobj(0),
-            sync_addr(NULL),
+            sync_addr(nullptr),
             cmdbuf(0),
             cmdbuf_addr(cmdbuf_addr),
             cmdbuf_size(cmdbuf_size),
@@ -85,7 +85,10 @@ public:
 
   virtual hsa_status_t Init(void) { return HSA_STATUS_SUCCESS; }
   virtual hsa_status_t Fini(void) { return HSA_STATUS_SUCCESS; }
-  virtual void RingDoorbell(uint64_t value) { }
+  //!< Publishes `value` to the engine. Returns false when the submission itself failed
+  //!< (the packets were not handed to the KMD), so hsaKmtQueueRingDoorbell can report the
+  //!< failure to the producer instead of leaving it waiting on work that will never run.
+  virtual bool RingDoorbell(uint64_t value) { return true; }
   virtual void* GetHsaQueueAddr(void) const { return reinterpret_cast<void*>(GetCmdbufAddr()); }
 
   // amd_queue_t backing memory; only ComputeQueue has one, SDMAQueue returns nullptr.
@@ -160,7 +163,10 @@ public:
   //!< Populated by WDDMDevice::CreateHwQueue and surfaced to ROCr so the SDMA
   //!< ring can emit a matching FENCE packet. 0 when not a native SDMA queue.
   uint64_t hwqueue_progress_fence_va_ = 0;
-  //!< Monotonic HwQueue progress fence id, incremented per native SDMA submit.
+  //!< HwQueue progress fence id for the native SDMA user queue. Per the KMD spec the UMD
+  //!< keeps a counter and increments it by exactly 1 per D3DKMTSubmitCommandToHwQueue call.
+  //!< This is specific to the SDMA USER queue -- the compute queue and the legacy SDMA
+  //!< queue use different fence mechanisms; do not carry assumptions between them.
   uint64_t hwqueue_fence_id_ = 0;
 };
 
@@ -204,7 +210,7 @@ public:
 
   hsa_status_t Process(void);
   uint64_t * GetDoorbellPtr() const { return (uint64_t *)&doorbell_signal_value_; }
-  void RingDoorbell(uint64_t value);
+  bool RingDoorbell(uint64_t value) override;
   GpuMemory* GetAmdQueueMemory() const override { return amd_queue_memory_; }
 
  private:
@@ -317,9 +323,45 @@ public:
   }
 
   uint64_t * GetRingWptr(void) { return &wptr_next_; }
-  uint64_t * GetRingRptr(void) { return WDDMQueue::GetSyncAddr(); }
+
+  //!< Byte-valued ring read pointer handed to ROCr as HsaQueueResource::Queue_read_ptr.
+  //!<
+  //!< Native SDMA user queue: the KMD keeps the ring read offset in
+  //!< amd_queue_t::read_dispatch_id as MES consumes the buffer
+  //!< (CS_SdmaUserQueue_AQL::GetReadPtrGpuVa computes exactly this address). That field lives
+  //!< in the AmdQueueT page THIS queue allocated and handed to CreateHwQueue, so its address
+  //!< is derived here rather than taken on trust from a value the KMD hands back.
+  //!<
+  //!< Legacy SWS path uses GetSyncAddr() instead: there SwsSubmit/HwsSubmit pass the
+  //!< accumulated byte count rptr_next as the fence value, so the sync address holds bytes
+  //!< because the UMD put them there. Two distinct mechanisms -- do not reason from one to
+  //!< the other.
+  uint64_t * GetRingRptr(void) {
+    if (native_sdma_ && amd_queue_memory_ != nullptr &&
+        amd_queue_memory_->CpuAddress() != nullptr) {
+      // read_dispatch_id is declared volatile in amd_hsa_queue.h because the GPU side writes
+      // it behind the CPU's back. Keep that qualifier while taking the address, then drop it
+      // only at the handoff: HsaQueueResource::Queue_read_ptr_aql is a plain HSAuint64* and
+      // cannot carry it. Dropping it is safe because nothing in libhsakmt reads this location
+      // -- the consumers re-apply volatile themselves (amd_blit_sdma.cpp, amd_sdma_queue.cpp),
+      // which is what makes their polling loops correct. Anything added here that DOES read it
+      // must go through a volatile pointer, and must never use atomic::Load: on Windows that
+      // lowers to an interlocked RMW, i.e. a write.
+      volatile uint64_t* rptr =
+          &reinterpret_cast<amd_queue_t*>(amd_queue_memory_->CpuAddress())->read_dispatch_id;
+      return const_cast<uint64_t*>(rptr);
+    }
+    return WDDMQueue::GetSyncAddr();
+  }
   uint64_t * GetDoorbellPtr() { return &doorbell_; }
-  void RingDoorbell(uint64_t value);
+  bool RingDoorbell(uint64_t value) override;
+
+  //!< Appends the progress-fence epilogue to [start, end) and submits it through the WDDM
+  //!< HwQueue. Native path only, and only from SdmaThread -- the span's dependency
+  //!< POLL_REGMEM packets must already be resolved and stripped before the engine sees it.
+  //!< Returns false if the paging-fence wait or the KMD submit failed, in which case the
+  //!< span was NOT handed to the engine and nothing in it will ever complete.
+  bool SubmitNative(uint64_t start, uint64_t end);
   void* GetHsaQueueAddr(void) const { return reinterpret_cast<void*>(GetCmdbufAddr()); }
 
   //!< True when this queue submits via the native WDDM SDMA HwQueue path
@@ -328,8 +370,10 @@ public:
   bool IsNativeSdma(void) const { return native_sdma_; }
 
   //!< Bytes appended per native-SDMA doorbell: one SDMA_PKT_FENCE_CONDITIONAL_INTERRUPT
-  //!< (8 dwords). Single source of truth for RingDoorbell (writes it) and the
-  //!< producer-reserved headroom advertised via HsaQueueResource::SdmaHwQueueEpilogueBytes.
+  //!< (8 dwords) carrying the HwQueue progress fence. The ring read pointer needs no packet
+  //!< of its own -- the KMD maintains it in amd_queue_t::read_dispatch_id (see GetRingRptr).
+  //!< Single source of truth for RingDoorbell (writes it) and the producer-reserved headroom
+  //!< advertised via HsaSdmaUserQueueInfo::EpilogueBytes.
   static constexpr uint32_t kHwQueueEpilogueBytes = 8 * 4;
 
   //!< GpuMemory backing the amd_queue_t the KMD's SDMA-AQL HwQueue reports read_dispatch_id
@@ -340,8 +384,8 @@ public:
 
 private:
   GpuMemory* amd_queue_memory_ = nullptr;
-  uint64_t amd_queue_addr_ = 0;
   bool native_sdma_ = false;
+
   uint64_t wptr_next_;
   uint64_t wptr_pre_;
   uint64_t rptr_next;
@@ -349,6 +393,15 @@ private:
   std::vector<std::pair<uint64_t, uint64_t>> wptr_queue_;
   uint64_t ib_size;
   uint64_t ib_start_addr;
+
+  //!< True from when SdmaThread dequeues a batch until that batch is fully submitted. Guarded by
+  //!< thread_cond_lock_. RingDoorbell's inline fast path requires this clear AND wptr_queue_
+  //!< empty, so an inline submit can never advance the wptr past a span still awaiting its polls.
+  bool thread_busy_ = false;
+
+  //!< True when [start, end) opens with a dependency POLL_REGMEM packet, i.e. the span must go
+  //!< through SdmaThread for host-side poll emulation instead of being submitted inline.
+  bool SpanNeedsPollEmulation(uint64_t start, uint64_t end);
 
   std::thread thread_;
   bool thread_stop_;

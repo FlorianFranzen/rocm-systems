@@ -45,6 +45,16 @@ class GpuAgent;
 ///   e. Publish via the doorbell signal store after a release fence.
 /// Callers must serialize a-e (e.g. a lock) because the index accessors here
 /// do not implement a reservation/commit handshake.
+///
+/// RESERVED TAIL. On Windows/DXG a native SDMA user queue has libhsakmt append a
+/// progress-fence packet to the ring on every doorbell, so the producer must leave room for
+/// it: include those bytes in the ring-space check, keep them from straddling the ring end
+/// (pad to the ring end with no-ops first, just as for a packet that does not fit), and
+/// advance the write index by (packets + tail) leaving the trailing bytes unwritten. The
+/// size comes from HsaSdmaUserQueueInfo::EpilogueBytes via hsaKmtGetSdmaUserQueueInfo, which
+/// reports 0 on every other path -- see BlitSdma, which is this queue's in-tree producer.
+/// RingDoorbell publishes the write index unchanged; it does not reserve on the caller's
+/// behalf, because by then the caller has committed its packets and could not retry.
 class SdmaQueue : public core::Queue, private core::LocalSignal, public core::DoorbellSignal {
  public:
   static __forceinline bool IsType(core::Queue* queue) { return queue->IsType(&rtti_id()); }
@@ -135,13 +145,6 @@ class SdmaQueue : public core::Queue, private core::LocalSignal, public core::Do
   HsaQueueResource queue_resource_;
   int32_t sdma_engine_id_;
   bool active_;
-
-  // GPU VA of the WDDM HwQueue progress fence (native SDMA user queue on
-  // Windows/DXG only). When non-zero, RingDoorbell appends a FENCE+TRAP sequence
-  // that writes progress_fence_id_ here so the OS scheduler tracks completion.
-  // Zero on Linux/KFD and on the legacy SWS-thread path -> no packets appended.
-  uint64_t progress_fence_va_;
-  uint64_t progress_fence_id_;
 };
 
 }  // namespace AMD
