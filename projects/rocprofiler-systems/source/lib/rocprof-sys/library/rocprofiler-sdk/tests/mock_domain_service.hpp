@@ -570,9 +570,9 @@ struct externals
 
     struct track_t
     {
-        std::string   track_name;
-        std::uint64_t thread_id = 0;
-        std::string   extdata;
+        std::string                  track_name;
+        std::optional<std::uint64_t> thread_id = 0;
+        std::string                  extdata;
     };
 
     struct kfd_sample_t
