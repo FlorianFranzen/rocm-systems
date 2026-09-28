@@ -222,6 +222,7 @@ if(BUILD_TESTS)
     dl
     fmt::fmt-header-only
   )
+  set(RCCL_COMMON_BUILD_RPATH "")
   if(OPENMP_TESTS_ENABLED)
     list(APPEND RCCL_COMMON_LINK_LIBS OpenMP::OpenMP_CXX)
     foreach(openmpLibrary IN LISTS OpenMP_CXX_LIBRARIES)
@@ -277,6 +278,7 @@ if(BUILD_TESTS)
     RegisterTests.cpp
     ScatterTests.cpp
     P2pChannelScalingTests.cpp
+    PipeUtilsTests.cpp
     VersionGateTests.cpp
     SendRecvTests.cpp
     StandaloneTests.cpp
