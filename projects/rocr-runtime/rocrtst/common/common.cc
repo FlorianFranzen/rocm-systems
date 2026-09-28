@@ -124,12 +124,10 @@ bool isWslEnvironment() {
   return is_wsl;
 }
 
-bool SkipOnWsl(const char* reason) {
-  if (!isWslEnvironment()) return false;
-
-  // This gtest predates GTEST_SKIP(), so register the skip with the rocrtst
-  // SkippedTestTracker (shown in the end-of-run summary) rather than silently
-  // returning green.
+// Shared by SkipOnWsl and SkipIfNotWsl. This gtest predates GTEST_SKIP(), so
+// register the skip with the rocrtst SkippedTestTracker (shown in the
+// end-of-run summary) rather than silently returning green.
+static bool RecordSkip(const char* reason) {
   std::string test_name = "unknown";
   const ::testing::TestInfo* info =
       ::testing::UnitTest::GetInstance()->current_test_info();
@@ -140,6 +138,16 @@ bool SkipOnWsl(const char* reason) {
   SkippedTestTracker::getInstance().recordSkip(test_name, reason);
   std::cout << "[ SKIPPED ] " << test_name << " : " << reason << std::endl;
   return true;
+}
+
+bool SkipOnWsl(const char* reason) {
+  if (!isWslEnvironment()) return false;
+  return RecordSkip(reason);
+}
+
+bool SkipIfNotWsl(const char* reason) {
+  if (isWslEnvironment()) return false;
+  return RecordSkip(reason);
 }
 
 bool PlatformDetector::isFFMEnvironment() {
