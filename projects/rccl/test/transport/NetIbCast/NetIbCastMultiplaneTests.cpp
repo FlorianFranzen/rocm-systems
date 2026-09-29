@@ -30,12 +30,11 @@
 
 struct ibv_gid;  // forward; tests use the raw uint8_t[16] wrappers
 
-extern "C" {
-ncclResult_t ibCastMultiplaneLoad(void);
-ncclResult_t ibCastMultiplaneEnabled(bool* enabled);
-ncclResult_t ibCastMultiplaneGetPipGids(const union ibv_gid* vipGid,
+// These are C++ functions (multiplane.cc is compiled as C++)
+ncclResult_t IbCastMultiplaneLoad(void);
+ncclResult_t IbCastMultiplaneEnabled(bool* enabled);
+ncclResult_t IbCastMultiplaneGetPipGids(const union ibv_gid* vipGid,
                                         union ibv_gid* pipGids, int* nPips);
-}
 
 namespace {
 
@@ -107,13 +106,13 @@ TEST(NetIbCastMultiplane, GidToStringAllZeros) {
 }
 
 // =====================================================================
-// 2. ibCastMultiplaneEnabled  (env var gating)
+// 2. IbCastMultiplaneEnabled  (env var gating)
 // =====================================================================
 
 TEST(NetIbCastMultiplane, EnabledWhenEnvSet) {
   setenv("RCCL_MULTIPLANE_MAP_FILE", "/tmp/dummy.xml", 1);
   bool enabled = false;
-  ASSERT_EQ(ibCastMultiplaneEnabled(&enabled), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneEnabled(&enabled), ncclSuccess);
   EXPECT_TRUE(enabled);
   unsetenv("RCCL_MULTIPLANE_MAP_FILE");
 }
@@ -121,14 +120,14 @@ TEST(NetIbCastMultiplane, EnabledWhenEnvSet) {
 TEST(NetIbCastMultiplane, DisabledWhenEnvUnset) {
   unsetenv("RCCL_MULTIPLANE_MAP_FILE");
   bool enabled = true;
-  ASSERT_EQ(ibCastMultiplaneEnabled(&enabled), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneEnabled(&enabled), ncclSuccess);
   EXPECT_FALSE(enabled);
 }
 
 TEST(NetIbCastMultiplane, DisabledWhenEnvEmpty) {
   setenv("RCCL_MULTIPLANE_MAP_FILE", "", 1);
   bool enabled = true;
-  ASSERT_EQ(ibCastMultiplaneEnabled(&enabled), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneEnabled(&enabled), ncclSuccess);
   EXPECT_FALSE(enabled);
   unsetenv("RCCL_MULTIPLANE_MAP_FILE");
 }
@@ -174,7 +173,7 @@ TEST_F(MultiplaneLoadTest, LoadValidXmlAndResolvePips) {
   std::string path = WriteTestXml(kMinimalXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   // Look up nodeA's interface (VIP GID = ::ffff:50.1.0.2)
   union ibv_gid vipGid;
@@ -185,7 +184,7 @@ TEST_F(MultiplaneLoadTest, LoadValidXmlAndResolvePips) {
 
   union ibv_gid pipGids[16];
   int nPips = 0;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 2);
 
   // Verify PIP[0] = ::ffff:50.1.1.2
@@ -205,7 +204,7 @@ TEST_F(MultiplaneLoadTest, LoadValidXmlSecondHost) {
   std::string path = WriteTestXml(kMinimalXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   // Look up nodeB's interface (VIP GID = ::ffff:60.1.0.2)
   union ibv_gid vipGid;
@@ -214,7 +213,7 @@ TEST_F(MultiplaneLoadTest, LoadValidXmlSecondHost) {
 
   union ibv_gid pipGids[16];
   int nPips = 0;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 3);
 
   // Verify PIP[2] = ::ffff:60.1.3.2
@@ -229,7 +228,7 @@ TEST_F(MultiplaneLoadTest, UnknownVipReturnsZeroPips) {
   std::string path = WriteTestXml(kMinimalXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   // GID that is not in the map
   union ibv_gid unknownGid;
@@ -238,7 +237,7 @@ TEST_F(MultiplaneLoadTest, UnknownVipReturnsZeroPips) {
 
   union ibv_gid pipGids[16];
   int nPips = -1;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&unknownGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&unknownGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 0);
 
   remove(path.c_str());
@@ -246,7 +245,7 @@ TEST_F(MultiplaneLoadTest, UnknownVipReturnsZeroPips) {
 
 TEST_F(MultiplaneLoadTest, DisabledReturnsZeroPips) {
   // Do NOT set RCCL_MULTIPLANE_MAP_FILE -> load is a no-op
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   union ibv_gid vipGid;
   memset(&vipGid, 0, sizeof(vipGid));
@@ -254,13 +253,13 @@ TEST_F(MultiplaneLoadTest, DisabledReturnsZeroPips) {
 
   union ibv_gid pipGids[16];
   int nPips = -1;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 0);
 }
 
 TEST_F(MultiplaneLoadTest, MissingFileReturnsError) {
   setenv("RCCL_MULTIPLANE_MAP_FILE", "/tmp/rccl_no_such_file_12345.xml", 1);
-  EXPECT_NE(ibCastMultiplaneLoad(), ncclSuccess);
+  EXPECT_NE(IbCastMultiplaneLoad(), ncclSuccess);
 }
 
 // =====================================================================
@@ -317,7 +316,7 @@ TEST_F(MultiplaneLoadTest, FourPipsResolved) {
   std::string path = WriteTestXml(kFourPipXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   union ibv_gid vipGid;
   memset(&vipGid, 0, sizeof(vipGid));
@@ -325,7 +324,7 @@ TEST_F(MultiplaneLoadTest, FourPipsResolved) {
 
   union ibv_gid pipGids[16];
   int nPips = 0;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 4);
 
   // Verify each PIP's last two bytes (the varying octets: 50.1.{1,2,3,4}.2)
@@ -360,7 +359,7 @@ TEST_F(MultiplaneLoadTest, MultipleInterfacesSameHost) {
   std::string path = WriteTestXml(kMultiIfXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   // Interface 1: 1 PIP
   {
@@ -369,7 +368,7 @@ TEST_F(MultiplaneLoadTest, MultipleInterfacesSameHost) {
     MakeGidV4Mapped(vipGid.raw, 50, 1, 0, 2);
     union ibv_gid pipGids[16];
     int nPips = 0;
-    ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+    ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
     EXPECT_EQ(nPips, 1);
   }
 
@@ -380,7 +379,7 @@ TEST_F(MultiplaneLoadTest, MultipleInterfacesSameHost) {
     MakeGidV4Mapped(vipGid.raw, 50, 2, 0, 2);
     union ibv_gid pipGids[16];
     int nPips = 0;
-    ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+    ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
     EXPECT_EQ(nPips, 2);
   }
 
@@ -405,7 +404,7 @@ TEST_F(MultiplaneLoadTest, IPv6PipResolution) {
   std::string path = WriteTestXml(kIpv6PipXml);
   setenv("RCCL_MULTIPLANE_MAP_FILE", path.c_str(), 1);
 
-  ASSERT_EQ(ibCastMultiplaneLoad(), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   union ibv_gid vipGid;
   memset(&vipGid, 0, sizeof(vipGid));
@@ -416,7 +415,7 @@ TEST_F(MultiplaneLoadTest, IPv6PipResolution) {
 
   union ibv_gid pipGids[16];
   int nPips = 0;
-  ASSERT_EQ(ibCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
+  ASSERT_EQ(IbCastMultiplaneGetPipGids(&vipGid, pipGids, &nPips), ncclSuccess);
   EXPECT_EQ(nPips, 2);
 
   // PIP[0] = 2001:db8::10

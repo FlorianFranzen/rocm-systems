@@ -82,7 +82,7 @@ ncclResult_t ncclIbCastTestIpToGid(const char* ipStr, uint8_t gid[16]);
  * (e.g. "fe80:0000:...:0002").  buf must be at least 40 bytes. */
 void ncclIbCastTestGidToString(const uint8_t gid[16], char* buf, int bufLen);
 
-/* Reset multiplane module state so ibCastMultiplaneLoad() can be called again.
+/* Reset multiplane module state so IbCastMultiplaneLoad() can be called again.
  * Test-only: not thread-safe, must not be called while other threads may be
  * loading or querying multiplane state. */
 void ncclIbCastTestMultiplaneReset(void);
