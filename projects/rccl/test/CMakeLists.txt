@@ -963,6 +963,24 @@ if(BUILD_TESTS)
       target_compile_definitions(rccl-HostApiCustomGinPluginMPI PRIVATE
         RCCL_GIN_EXAMPLE_PLUGIN_DIR="${RCCL_GIN_EXAMPLE_PLUGIN_DIR}"
       )
+
+      # Separate binary for the same reason: a GIN plugin is selected once per
+      # process, so the fault-injection env has to be set before any other test
+      # has brought a communicator up.
+      add_executable(rccl-GinConnectLeakMPI
+        common/main_mpi.cpp
+        common/MPIHelpers.cpp
+        common/MPITestCore.cpp
+        common/MPIEnvironment.cpp
+        common/TestChecks.cpp
+        common/MPIHostUtils.cc
+        GinConnectLeakMPITests.cpp
+      )
+      list(APPEND RCCL_TEST_EXECUTABLES rccl-GinConnectLeakMPI)
+      add_dependencies(rccl-GinConnectLeakMPI rccl-gin-example)
+      target_compile_definitions(rccl-GinConnectLeakMPI PRIVATE
+        RCCL_GIN_EXAMPLE_PLUGIN_DIR="${RCCL_GIN_EXAMPLE_PLUGIN_DIR}"
+      )
     endif()
   endif()
 
