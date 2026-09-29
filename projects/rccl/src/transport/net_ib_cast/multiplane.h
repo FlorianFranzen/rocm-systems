@@ -17,6 +17,7 @@
 struct ncclIbPipInfo {
   char ip[MAX_STR_LEN];
   char interface[MAX_STR_LEN];
+  union ibv_gid gid;  // pre-parsed at load time; avoids repeated inet_pton per QP RTR
 };
 
 // Load and parse the multiplane VIP-to-PIP mapping file (idempotent).

@@ -146,6 +146,9 @@ static ncclResult_t ibCastMultiplanePopulateMap(struct ncclXml* xml) {
           strncpy(info.interface, pipIface, MAX_STR_LEN - 1);
           info.interface[MAX_STR_LEN - 1] = '\0';
         }
+        // Parse PIP IP at load time to catch malformed addresses early
+        // and avoid repeated inet_pton on every QP RTR.
+        NCCLCHECK(ibCastIpToGid(pipIp, &info.gid));
         pips.push_back(info);
       }
 
@@ -157,6 +160,9 @@ static ncclResult_t ibCastMultiplanePopulateMap(struct ncclXml* xml) {
       char canonicalGid[64];
       ibCastGidToString(&parsedGid, canonicalGid, sizeof(canonicalGid));
       std::string key(canonicalGid);
+      if (gidToPipMap.count(key)) {
+        WARN("Multiplane: duplicate GID %s in map file — overwriting previous entry", canonicalGid);
+      }
       gidToPipMap[key] = pips;
       INFO(NCCL_NET, "Multiplane: GID %s (canonical: %s) -> %zu PIPs", gidStr, canonicalGid, pips.size());
       for (size_t p = 0; p < pips.size(); p++) {
@@ -240,7 +246,7 @@ ncclResult_t IbCastMultiplaneGetPipGids(const union ibv_gid* vipGid, union ibv_g
   if (count > MULTIPLANE_MAX_PIPS) count = MULTIPLANE_MAX_PIPS;
 
   for (int i = 0; i < count; i++) {
-    NCCLCHECK(ibCastIpToGid(pips[i].ip, &pipGids[i]));
+    pipGids[i] = pips[i].gid;
   }
   *nPips = count;
   INFO(NCCL_NET, "Multiplane: GID %s resolved to %d PIPs", gidStr, count);

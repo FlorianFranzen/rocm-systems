@@ -25,16 +25,8 @@
 
 #include "net_ib_cast_inspect.h"
 
-// multiplane public API (declared in multiplane.h, linked from librccl.so)
-#include "nccl.h"
-
-struct ibv_gid;  // forward; tests use the raw uint8_t[16] wrappers
-
-// These are C++ functions (multiplane.cc is compiled as C++)
-ncclResult_t IbCastMultiplaneLoad(void);
-ncclResult_t IbCastMultiplaneEnabled(bool* enabled);
-ncclResult_t IbCastMultiplaneGetPipGids(const union ibv_gid* vipGid,
-                                        union ibv_gid* pipGids, int* nPips);
+// multiplane public API — include the actual header for ibv_gid and function declarations
+#include "multiplane.h"
 
 namespace {
 
@@ -244,7 +236,8 @@ TEST_F(MultiplaneLoadTest, UnknownVipReturnsZeroPips) {
 }
 
 TEST_F(MultiplaneLoadTest, DisabledReturnsZeroPips) {
-  // Do NOT set RCCL_MULTIPLANE_MAP_FILE -> load is a no-op
+  // Explicitly unset to guard against inheriting from the environment
+  unsetenv("RCCL_MULTIPLANE_MAP_FILE");
   ASSERT_EQ(IbCastMultiplaneLoad(), ncclSuccess);
 
   union ibv_gid vipGid;
