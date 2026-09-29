@@ -89,6 +89,7 @@ using callback_tracing_cb_t =
              typename SdkBackend::user_data_t* user_data, void* callback_data);
 
 using configure_cb_t = void (*)();
+using finalize_cb_t  = void (*)();
 
 template <typename SdkBackend>
 struct buffered_domain_definition
@@ -97,6 +98,7 @@ struct buffered_domain_definition
     buffer_tracing_cb_t<SdkBackend> on_records;
     buffer_properties               buffer = k_default_buffer_properties;
     configure_cb_t                  on_configure;
+    finalize_cb_t                   on_finalize;
 };
 
 template <typename SdkBackend>
@@ -105,6 +107,7 @@ struct callback_domain_definition
     domain_descriptor                 meta;
     callback_tracing_cb_t<SdkBackend> on_record;
     configure_cb_t                    on_configure;
+    finalize_cb_t                     on_finalize;
 };
 
 struct domain_configuration

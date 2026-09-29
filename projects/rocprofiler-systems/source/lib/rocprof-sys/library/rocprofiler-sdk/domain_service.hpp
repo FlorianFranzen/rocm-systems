@@ -89,6 +89,19 @@ public:
         return m_configuration;
     }
 
+    void finalize()
+    {
+        for(auto& domain : m_callback_domains)
+        {
+            domain.finalize();
+        }
+
+        for(auto& domain : m_buffered_domains)
+        {
+            domain.finalize();
+        }
+    }
+
 private:
     [[nodiscard]] std::vector<domains::domain_configuration> resolve_configuration(
         std::span<const domain_selection> selections) const
