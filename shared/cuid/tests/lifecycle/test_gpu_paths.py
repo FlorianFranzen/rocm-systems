@@ -8,6 +8,7 @@ shim supplies DRM device numbers and rejects execution against the host /sys.
 """
 
 import ctypes
+import hashlib
 import importlib.util
 import os
 from pathlib import Path
@@ -20,6 +21,9 @@ import unittest
 
 BUILD = Path(sys.argv.pop(1)).resolve()
 ROOT = BUILD / "lifecycle-state"
+A = b"A" * 32
+B = bytes(0x40 + 3 * n for n in range(32))
+NO_FINGERPRINT = "00" * 8
 spec = importlib.util.spec_from_file_location(
     "vectors", Path(__file__).resolve().parents[1] / "vectors/cuid_vectors.py"
 )
@@ -132,18 +136,29 @@ class GpuPaths(unittest.TestCase):
         self.drm(device, card, render)
         self.devices[bdf] = device
 
-    def publish(self, device, serial, unit=0):
+    def publish(self, device, serial, unit=0, key=A):
+        """The driver's attributes. With key None, cuid_derived fails with
+        ENODATA, which the shim makes of an empty file."""
         primary = vectors.pack_primary(serial, unit, 1, 0x73A3, 0x1002, vectors.GPU)
         self.write(
             device / "cuid_primary",
             vectors.uuid_str(vectors.to_uuidv8(primary)) + "\n",
             0o400,
         )
+        derived = ""
+        if key is not None:
+            _, derived = vectors.derive(key, primary)
+            derived = vectors.uuid_str(vectors.to_uuidv8(derived)) + "\n"
+        self.write(device / "cuid_derived", derived, 0o444)
         self.write(device / "cuid_unit_id", f"{unit}\n", 0o444)
 
-    def driver(self):
+    def driver(self, key=A):
+        """amdgpu on both GPUs, holding `key`, or no key when it is None."""
         for bdf, serial in (("0000:03:00.0", 0x11110001), ("0000:63:00.0", 0x22220002)):
-            self.publish(self.devices[bdf], serial)
+            device = self.devices[bdf]
+            self.publish(device, serial, key=key)
+            (device / "cuid_seed").write_bytes(key or b"")
+            (device / "cuid_seed").chmod(0o600)
 
     def components(self):
         """SMBIOS and a two-port NIC whose functions share one PCIe Device
@@ -180,7 +195,7 @@ class GpuPaths(unittest.TestCase):
                 "/sys/" + str(net.relative_to(self.sys)),
             )
 
-    def partitions(self, count=64, published=8):
+    def partitions(self, count=64, published=8, collide=False, key=A):
         self.parts = []
         for n in range(count):
             if n == 0:
@@ -195,7 +210,7 @@ class GpuPaths(unittest.TestCase):
             attr.chmod(0o755)
             self.parts.append(attr)
             if n < published:
-                self.publish(attr, 0x11110001, 0x40 | n)
+                self.publish(attr, 0x11110001, 0 if collide else 0x40 | n, key=key)
 
     def start(self, *args, nonroot=False, baseline=False, errors=False):
         binary = BUILD / (
@@ -287,6 +302,21 @@ class GpuPaths(unittest.TestCase):
                     forms += ["/sys/class/drm/card0", "fd=/dev/dri/card0"]
                 self.run_probe("sequence", *forms, nonroot=role)
 
+    def test_driver_rekey_then_fresh_paths(self):
+        for nonroot in (False, True):
+            with self.subTest(nonroot=nonroot):
+                self.driver()
+                child = self.start("wait-rotate", nonroot=nonroot)
+                try:
+                    self.assertEqual(child.stdout.readline().strip(), "ready")
+                    self.run_probe("rotate")
+                    child.communicate("continue\n", timeout=30)
+                    self.assertEqual(child.returncode, 0)
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait()
+
     def test_unrelated_pci_object_is_not_a_gpu(self):
         self.driver()
         self.gpu("0000:05:00.0", 2, 130, 0x33330003)
@@ -298,6 +328,26 @@ class GpuPaths(unittest.TestCase):
         shutil.rmtree(device / "drm")
         for role in (False, True):
             self.run_probe("not-gpu", nonroot=role)
+
+    def test_failed_collision_does_not_poison_prior_devices(self):
+        self.driver()
+        children = [
+            self.start("wait-reject", "/dev/dri/renderD130", nonroot=role)
+            for role in (False, True)
+        ]
+        try:
+            for child in children:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+            self.gpu("0000:05:00.0", 2, 130, 0x11110001)
+            self.publish(self.devices["0000:05:00.0"], 0x11110001)
+            for child in children:
+                child.communicate("continue\n", timeout=30)
+                self.assertEqual(child.returncode, 0)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
 
     def test_drm_device_link_must_match_its_owning_object(self):
         self.driver()
@@ -320,12 +370,49 @@ class GpuPaths(unittest.TestCase):
                     child.kill()
                     child.wait()
 
-    def test_partitions_have_no_handle(self):
+    def test_whole_and_partition_zero_collision_is_not_an_alias(self):
+        self.driver()
+        children = [
+            self.start(
+                "wait-reject", "/sys/bus/pci/devices/0000:03:00.0/xcp", nonroot=role
+            )
+            for role in (False, True)
+        ]
+        try:
+            for child in children:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+            self.partitions(count=1, published=1, collide=True)
+            for child in children:
+                child.communicate("continue\n", timeout=30)
+                self.assertEqual(child.returncode, 0)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+    def test_partition_paths_and_unpublish(self):
         self.driver()
         self.partitions()
-        for role in (False, True):
-            with self.subTest(nonroot=role):
-                self.run_probe("partitions", nonroot=role)
+        self.run_probe("partitions", "unknown-metadata", nonroot=True)
+        self.run_probe("partitions", "metadata")
+        children = [
+            self.start("wait-unpublish", nonroot=role) for role in (False, True)
+        ]
+        try:
+            for child in children:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+            for attr in self.parts:
+                for name in ("cuid_primary", "cuid_derived", "cuid_unit_id"):
+                    (attr / name).unlink(missing_ok=True)
+            for child in children:
+                child.communicate("continue\n", timeout=30)
+                self.assertEqual(child.returncode, 0)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
 
     def test_unnamed_vf_cannot_adopt_attributes(self):
         self.driver()
@@ -339,18 +426,87 @@ class GpuPaths(unittest.TestCase):
         for state in ("published", "unpublished"):
             if state == "unpublished":
                 for device in [*self.devices.values(), *self.parts]:
-                    for name in ("cuid_primary", "cuid_unit_id"):
+                    for name in ("cuid_primary", "cuid_derived", "cuid_unit_id"):
                         (device / name).unlink(missing_ok=True)
             for role in (False, True):
                 with self.subTest(state=state, nonroot=role):
                     self.run_probe("unnamed-vf", *forms, nonroot=role)
 
-    def test_components_are_temporary(self):
+    def test_distinct_xcp_objects_with_the_same_parent_are_not_aliases(self):
+        self.driver()
+        self.partitions(count=2, published=1)
+        target = "/sys/devices/platform/amdgpu_xcp.1/xcp"
+        children = [
+            self.start("wait-reject-xcp", target, nonroot=role)
+            for role in (False, True)
+        ]
+        try:
+            for child in children:
+                self.assertEqual(child.stdout.readline().strip(), "ready")
+            self.publish(
+                self.parts[1], 0x11110001, 0x40
+            )  # Same ID as partition 0, different object.
+            for child in children:
+                child.communicate("continue\n", timeout=30)
+                self.assertEqual(child.returncode, 0)
+        finally:
+            for child in children:
+                if child.poll() is None:
+                    child.kill()
+                    child.wait()
+
+    def test_set_key_without_amdgpu_is_unsupported(self):
         self.components()
-        for role in (False, True):
-            with self.subTest(nonroot=role):
-                self.run_probe("components", nonroot=role)
-                self.run_probe("nic-functions", nonroot=role)
+        self.run_probe("key-info", "SUCCESS", NO_FINGERPRINT, "0")
+        self.run_probe("set-key", B.hex(), "UNSUPPORTED")
+        self.run_probe("key-info", "SUCCESS", NO_FINGERPRINT, "0")
+        self.run_probe("components", "temporary")
+        self.assertFalse((self.sys / "firmware").exists())
+
+    def test_set_key_through_amdgpu(self):
+        """amdgpu starts without a key; setting one through any cuid_seed keys
+        every GPU, and only root reads it back."""
+        self.components()
+        self.driver(key=None)
+        self.run_probe("key-info", "SUCCESS", NO_FINGERPRINT, "0")
+        self.run_probe("components", "temporary")
+        self.run_probe("set-key", B.hex(), "SUCCESS")
+        for device in self.devices.values():
+            self.assertEqual((device / "cuid_seed").read_bytes(), B)
+        self.run_probe("key-info", "SUCCESS", hashlib.sha256(B).hexdigest()[:16], "1")
+        self.run_probe("key-info", "PERMISSION_DENIED", nonroot=True)
+        self.run_probe("components", "keyed", B.hex())
+        self.run_probe("components", "temporary", nonroot=True)
+        self.assertFalse((self.sys / "firmware").exists())
+
+    def test_node_key_from_cuid_seed(self):
+        self.components()
+        cases = [
+            (A, "1", "keyed"),
+            (None, "0", "temporary"),
+            (A[:31], "0", "temporary"),
+        ]
+        for key, provisioned, mode in cases:
+            with self.subTest(key=key):
+                self.driver(key=None if key is None else A)
+                if key is not None:
+                    for device in self.devices.values():
+                        (device / "cuid_seed").write_bytes(key)
+                fingerprint = (
+                    hashlib.sha256(key).hexdigest()[:16]
+                    if provisioned == "1"
+                    else NO_FINGERPRINT
+                )
+                self.run_probe("key-info", "SUCCESS", fingerprint, provisioned)
+                self.run_probe("components", mode, A.hex())
+                self.run_probe("key-info", "PERMISSION_DENIED", nonroot=True)
+                self.run_probe("components", "temporary", nonroot=True)
+
+    def test_keyed_nic_functions_have_their_own_identity(self):
+        self.components()
+        self.driver()
+        self.run_probe("nic-functions")
+        self.run_probe("nic-functions", nonroot=True)
 
     def test_other_vendor_display_is_not_a_gpu(self):
         self.driver()
@@ -368,14 +524,49 @@ class GpuPaths(unittest.TestCase):
             with self.subTest(nonroot=role):
                 self.run_probe("foreign", *forms, nonroot=role)
 
-    def test_whole_gpu_is_temporary(self):
+    def test_unpublished_whole_gpu_is_temporary(self):
         forms = ["bdf=0000:03:00.0", "/dev/dri/renderD128", "/sys/class/drm/card0"]
-        for published in (False, True):
-            if published:
-                self.driver()
+        for published in ("nothing", "primary only", "no key"):
+            if published == "primary only":
+                self.publish(self.devices["0000:03:00.0"], 0x11110001)
+                (self.devices["0000:03:00.0"] / "cuid_derived").unlink()
+            elif published == "no key":
+                self.driver(key=None)
             for role in (False, True):
                 with self.subTest(published=published, nonroot=role):
                     self.run_probe("temporary-gpu", *forms, nonroot=role)
+
+    def test_partitions_without_a_key_have_no_cuid(self):
+        self.driver(key=None)
+        self.partitions(count=8, key=None)
+        for role in (False, True):
+            with self.subTest(nonroot=role):
+                self.run_probe("unpublished-partitions", nonroot=role)
+
+    def test_temporary_gpu_takes_the_driver_value_once_published(self):
+        primary = vectors.pack_primary(0x11110001, 0, 1, 0x73A3, 0x1002, vectors.GPU)
+        _, derived = vectors.derive(A, primary)
+        expected = vectors.uuid_str(vectors.to_uuidv8(derived))
+        for before in ("nothing", "no key"):
+            with self.subTest(before=before):
+                if before == "no key":
+                    self.driver(key=None)
+                children = [
+                    self.start("wait-publish", expected, nonroot=role)
+                    for role in (False, True)
+                ]
+                try:
+                    for child in children:
+                        self.assertEqual(child.stdout.readline().strip(), "ready")
+                    self.publish(self.devices["0000:03:00.0"], 0x11110001)
+                    for child in children:
+                        child.communicate("continue\n", timeout=30)
+                        self.assertEqual(child.returncode, 0)
+                finally:
+                    for child in children:
+                        if child.poll() is None:
+                            child.kill()
+                            child.wait()
 
     def test_existing_cuid_suites_in_private_namespace(self):
         self.driver()
