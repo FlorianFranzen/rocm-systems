@@ -12,12 +12,12 @@
 - [x] 2.1 Identity series: driver marker `cuid_unit_id`; GPU derived CUID falls
       back to a temporary CUID without a key; remove the daemon, key file,
       record store and default seed; no key setter.
-- [ ] 2.2 Node-key series on top: `add-volatile-node-key` 2.1 to 2.4.
-- [ ] 2.3 ctest, amd-smi gtest and pytest at both heads.
+- [x] 2.2 Node-key series on top: `add-volatile-node-key` 2.1 to 2.4.
+- [x] 2.3 ctest, amd-smi gtest and pytest at both heads.
 
 ## 3. Verification
 
-- [ ] 3.1 Fixture sysfs (`cuid_gpu_paths`): one library serves a kernel from
+- [x] 3.1 Fixture sysfs (`cuid_gpu_paths`): one library serves a kernel from
       either series, including `cuid_derived` failing with `ENODATA`.
 - [x] 3.2 MI350X, identity kernel: primary and UnitID for every partition in
       SPX/DPX/QPX/CPX; amd-smi with the identity library.
