@@ -296,6 +296,23 @@ inline std::string mpiCoordinatedSkipReason(bool localSkip, const char* localRea
     return "Skipping: prerequisite failed on another rank";
 }
 
+// True when the condition holds on any rank. Use before acting on a per-rank
+// verdict: a rank that returns alone strands its peers in the next collective.
+inline bool mpiAnyRank(bool local)
+{
+    int v = local ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_INT, MPI_MAX, MPI_COMM_WORLD);
+    return v != 0;
+}
+
+// True only when the condition holds on every rank.
+inline bool mpiAllRanks(bool local)
+{
+    int v = local ? 1 : 0;
+    MPI_Allreduce(MPI_IN_PLACE, &v, 1, MPI_INT, MPI_MIN, MPI_COMM_WORLD);
+    return v != 0;
+}
+
 // Debug Logging Macros (TEST_*)
 
 /**
