@@ -56,8 +56,13 @@ schemas/                FlatBuffers schemas
 tests/                  Test suite
 docs/                   Design documents and guides
 website/                Public web applications
-  rocjitsu-dashboard/   React dashboard source and web tests
+  dashboard/            React dashboard source and web tests
+  handbook/             Markdown documentation and blog site
 ```
+
+See [website/handbook/README.md](website/handbook/README.md) to build and preview the
+Handbook. The simulation-performance dashboard has its own
+[website/dashboard/README.md](website/dashboard/README.md).
 
 ## Building
 
