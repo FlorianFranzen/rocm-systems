@@ -253,8 +253,8 @@ else()
         WARNING
         "CUID support: disabled -- BUILD_CUID=AUTO and no amdcuid ${AMDSMI_AMDCUID_MIN_VERSION} CMake package was found "
         "(AMDCUID_HINT_DIR=${AMDCUID_HINT_DIR}), and no sources at AMDCUID_SOURCE_DIR "
-        "(${AMDCUID_SOURCE_DIR}). amdsmi_get_gpu_cuid_info() will return "
-        "AMDSMI_STATUS_NOT_SUPPORTED in this build. "
+        "(${AMDCUID_SOURCE_DIR}). amdsmi_get_gpu_cuid_info() and "
+        "amdsmi_set_cuid_seed() will return AMDSMI_STATUS_NOT_SUPPORTED in this build. "
         "Pass -DBUILD_CUID=ON to make this a hard error, or -DBUILD_CUID=OFF to make it "
         "deliberate."
     )
@@ -330,6 +330,9 @@ function(amdsmi_configure_common_target _TARGET)
             # build never installs.
             target_sources(${_TARGET} PRIVATE ${AMDCUID_IN_TREE_OBJECTS})
             target_include_directories(${_TARGET} SYSTEM PRIVATE ${AMDCUID_INCLUDE_DIRS})
+            # The absorbed objects include rocm-sha256, which an installed
+            # libamdcuid does not export.
+            target_compile_definitions(${_TARGET} PRIVATE AMDSMI_CUID_HAS_SHA256)
         else()
             target_link_libraries(${_TARGET} PRIVATE amdcuid::amdcuid)
         endif()

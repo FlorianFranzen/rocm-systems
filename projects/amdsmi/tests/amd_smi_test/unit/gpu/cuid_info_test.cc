@@ -155,6 +155,36 @@ bool MakeDirs(const std::string& path) {
 
 constexpr uint32_t kNoPartition = 0xFFFFFFFF;
 
+// SPX partition zero shares the PCI device but has its own publication. Without
+// XCP publication, only the first/unpartitioned processor may use the whole GPU.
+std::string DriverPublished(const std::string& root, const std::string& bdf, uint32_t render,
+                            uint32_t partition) {
+  std::string path =
+      root + "/class/drm/renderD" + std::to_string(render) + "/device/xcp/cuid_derived";
+  if (render == kNoPartition || access(path.c_str(), F_OK) != 0) {
+    if (partition != 0 && partition != kNoPartition) return "";
+    path = root + "/bus/pci/devices/" + bdf + "/cuid_derived";
+  }
+  std::ifstream in(path);
+  if (!in) return "";
+  std::string value;
+  std::getline(in, value);
+  while (!value.empty() && (value.back() == '\n' || value.back() == '\r' || value.back() == ' ')) {
+    value.pop_back();
+  }
+  return value;
+}
+
+std::string DriverPublished(amdsmi_processor_handle handle, const std::string& bdf) {
+  amdsmi_enumeration_info_t enumeration = {};
+  if (amdsmi_get_gpu_enumeration_info(handle, &enumeration) != AMDSMI_STATUS_SUCCESS)
+    enumeration.drm_render = kNoPartition;
+  amdsmi_kfd_info_t kfd = {};
+  if (amdsmi_get_gpu_kfd_info(handle, &kfd) != AMDSMI_STATUS_SUCCESS)
+    kfd.current_partition_id = kNoPartition;
+  return DriverPublished("/sys", bdf, enumeration.drm_render, kfd.current_partition_id);
+}
+
 std::vector<amdsmi_processor_handle> GpuHandles() {
   std::vector<amdsmi_processor_handle> handles;
 
@@ -238,6 +268,42 @@ constexpr bool kCuidBuiltIn = true;
 constexpr bool kCuidBuiltIn = false;
 #endif
 
+bool ReadExactly(const std::string& path, std::string& out, size_t size) {
+  std::ifstream file(path, std::ios::binary);
+  if (!file) return false;
+  out.assign(size + 1, '\0');
+  file.read(&out[0], static_cast<std::streamsize>(out.size()));
+  if (static_cast<size_t>(file.gcount()) != size) return false;
+  out.resize(size);
+  return true;
+}
+
+// Whether amdgpu holds a node key this process can read: any cuid_seed that
+// returns 32 octets. amdgpu fails the read with ENODATA while it holds none.
+bool NodeKey() {
+  if (geteuid() != 0) return false;
+  std::error_code ec;
+  for (const auto& entry : std::filesystem::directory_iterator("/sys/bus/pci/devices", ec)) {
+    std::string seed;
+    if (ReadExactly(entry.path().string() + "/cuid_seed", seed, AMDSMI_CUID_SEED_SIZE)) return true;
+  }
+  return false;
+}
+
+// A non-root caller is refused rather than told there is no key.
+amdsmi_status_t ExpectedSeedInfoStatus() {
+  return geteuid() == 0 ? AMDSMI_STATUS_SUCCESS : AMDSMI_STATUS_NO_PERM;
+}
+
+// Without a key, and on any failure, the struct must come back zeroed: a
+// fingerprint beside provisioned = 0 would name a key that is not there.
+void ExpectNothingReported(const amdsmi_cuid_seed_info_t& info) {
+  EXPECT_EQ(info.provisioned, 0) << "no key must not report a provisioning state";
+  for (size_t i = 0; i < sizeof(info.fingerprint); ++i) {
+    EXPECT_EQ(info.fingerprint[i], 0) << "no key must not report a fingerprint (octet " << i << ")";
+  }
+}
+
 }  // namespace
 
 // A null argument is a caller error, not a "not supported": this must be true
@@ -248,6 +314,8 @@ TEST(GpuUnit, CuidNullArgumentsRejected) {
   ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
 
   EXPECT_EQ(amdsmi_get_gpu_cuid_info(nullptr, nullptr), AMDSMI_STATUS_INVAL);
+  EXPECT_EQ(amdsmi_set_cuid_seed(nullptr), AMDSMI_STATUS_INVAL);
+  EXPECT_EQ(amdsmi_get_cuid_seed_info(nullptr), AMDSMI_STATUS_INVAL);
   amdsmi_cuid_component_t component = {};
   EXPECT_EQ(amdsmi_get_cuid_components(nullptr, &component), AMDSMI_STATUS_INVAL);
 }
@@ -263,6 +331,12 @@ TEST(GpuUnit, CuidEntryPointsNotSupportedWithoutTheLibrary) {
   const AmdSmiSession session;
   ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
 
+  amdsmi_cuid_seed_info_t seed_info = {};
+  EXPECT_EQ(amdsmi_get_cuid_seed_info(&seed_info), AMDSMI_STATUS_NOT_SUPPORTED);
+
+  const uint8_t seed[AMDSMI_CUID_SEED_SIZE] = {};
+  EXPECT_EQ(amdsmi_set_cuid_seed(seed), AMDSMI_STATUS_NOT_SUPPORTED);
+
   uint32_t count = 7;
   EXPECT_EQ(amdsmi_get_cuid_components(&count, nullptr), AMDSMI_STATUS_NOT_SUPPORTED);
   EXPECT_EQ(count, 0u);
@@ -271,8 +345,7 @@ TEST(GpuUnit, CuidEntryPointsNotSupportedWithoutTheLibrary) {
   // point dereferences the handle before returning, so a GPU-less machine
   // still exercises them.
   auto handles = GpuHandles();
-  int placeholder = 0;
-  if (handles.empty()) handles.push_back(reinterpret_cast<amdsmi_processor_handle>(&placeholder));
+  if (handles.empty()) handles.push_back(reinterpret_cast<amdsmi_processor_handle>(&seed_info));
 
   for (auto handle : handles) {
     amdsmi_cuid_info_t info = {};
@@ -282,6 +355,84 @@ TEST(GpuUnit, CuidEntryPointsNotSupportedWithoutTheLibrary) {
     unsigned int length = sizeof(cuid);
     EXPECT_EQ(amdsmi_get_gpu_device_cuid(handle, &length, cuid), AMDSMI_STATUS_NOT_SUPPORTED);
   }
+}
+
+// Built without libamdcuid the entry points still exist and report
+// not-supported. Built with it they answer, and which answer is right is
+// decided by the node key and the caller, so assert against those.
+TEST(GpuUnit, CuidSeedInfoAnsweredOrUnsupported) {
+  const AmdSmiSession session;
+  ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
+
+  amdsmi_cuid_seed_info_t info = {};
+  const amdsmi_status_t status = amdsmi_get_cuid_seed_info(&info);
+
+  if (!kCuidBuiltIn) {
+    ASSERT_EQ(status, AMDSMI_STATUS_NOT_SUPPORTED);
+    return;
+  }
+
+  ASSERT_EQ(status, ExpectedSeedInfoStatus()) << "euid " << geteuid();
+  if (status != AMDSMI_STATUS_SUCCESS || !NodeKey()) {
+    ExpectNothingReported(info);
+    return;
+  }
+
+  EXPECT_NE(info.provisioned, 0);
+  bool any_set = false;
+  for (uint8_t octet : info.fingerprint) {
+    if (octet != 0) any_set = true;
+  }
+  EXPECT_TRUE(any_set) << "seed fingerprint should never be all zeroes";
+}
+
+// The seed is write-only through this API. If a future change adds a way to
+// read it back, the struct grows a field and this stops being true.
+TEST(GpuUnit, CuidSeedInfoCarriesNoSeedMaterial) {
+  const AmdSmiSession session;
+  ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
+
+  // The shape of the struct is the requirement, and it holds in every state
+  // and in a build without the library: 8 octets of digest, and nothing else
+  // that could hold 32 octets of secret.
+  amdsmi_cuid_seed_info_t info = {};
+  EXPECT_EQ(sizeof(info.fingerprint), 8u);
+  EXPECT_LT(sizeof(info.fingerprint), 32u);
+
+  const amdsmi_status_t status = amdsmi_get_cuid_seed_info(&info);
+  if (!kCuidBuiltIn) {
+    ASSERT_EQ(status, AMDSMI_STATUS_NOT_SUPPORTED);
+    return;
+  }
+
+  ASSERT_EQ(status, ExpectedSeedInfoStatus()) << "euid " << geteuid();
+
+  // A failed query discloses less, never more.
+  if (status != AMDSMI_STATUS_SUCCESS) ExpectNothingReported(info);
+
+  // The reserved space is 32 octets, exactly the width of a seed, and the one
+  // place a future change could park seed material without widening the
+  // fingerprint. Assert it comes back as it went in, in every state.
+  for (size_t i = 0; i < sizeof(info.reserved_flags); ++i) {
+    EXPECT_EQ(info.reserved_flags[i], 0) << "reserved_flags[" << i << "] carries something";
+  }
+  for (size_t i = 0; i < sizeof(info.reserved) / sizeof(info.reserved[0]); ++i) {
+    EXPECT_EQ(info.reserved[i], 0u) << "reserved[" << i << "] carries something";
+  }
+}
+
+// A root run would reach the node key if the refusal ever regressed, so the
+// refusals themselves are covered by the library's unit tests.
+TEST(GpuUnit, CuidSetSeedNeedsRoot) {
+  if (!kCuidBuiltIn) GTEST_SKIP() << "built without CUID support";
+  if (geteuid() == 0) GTEST_SKIP() << "only an ordinary user can call it safely";
+
+  const AmdSmiSession session;
+  ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
+
+  uint8_t seed[AMDSMI_CUID_SEED_SIZE];
+  for (size_t i = 0; i < sizeof(seed); ++i) seed[i] = static_cast<uint8_t>(0x40 + i * 7);
+  EXPECT_EQ(amdsmi_set_cuid_seed(seed), AMDSMI_STATUS_NO_PERM);
 }
 
 // The decoder the auxiliary check below relies on, against the published
@@ -381,6 +532,82 @@ TEST(GpuUnit, CuidSnapshotIsSelfConsistent) {
   }
 }
 
+// Where the driver really does publish cuid_derived, the derived CUID that
+// comes back is the driver's value verbatim and the source says so: the kernel
+// and the library producing different values for one device is the failure the
+// driver stage exists to prevent. Only checkable where the attribute is real,
+// so it is skipped where it is not; no fabricated root, no build flag.
+TEST(GpuUnit, CuidDriverPublishedValueIsUsedVerbatim) {
+  if (!kCuidBuiltIn) GTEST_SKIP() << "built without CUID support";
+
+  const AmdSmiSession session;
+  ASSERT_EQ(session.status(), AMDSMI_STATUS_SUCCESS);
+
+  const auto handles = GpuHandles();
+  if (handles.empty()) GTEST_SKIP() << "no GPU present";
+
+  size_t checked = 0;
+  for (auto handle : handles) {
+    amdsmi_bdf_t bdf = {};
+    ASSERT_EQ(amdsmi_get_gpu_device_bdf(handle, &bdf), AMDSMI_STATUS_SUCCESS);
+    const std::string bdf_str = BdfString(bdf);
+
+    const std::string driver_value = DriverPublished(handle, bdf_str);
+    if (driver_value.empty()) continue;
+
+    amdsmi_cuid_info_t info = {};
+    const amdsmi_status_t status = amdsmi_get_gpu_cuid_info(handle, &info);
+    if (status == AMDSMI_STATUS_NOT_SUPPORTED || status == AMDSMI_STATUS_NO_PERM) {
+      GTEST_SKIP() << bdf_str << ": amd-smi reports no CUID (run as root)";
+    }
+    ASSERT_EQ(status, AMDSMI_STATUS_SUCCESS) << bdf_str;
+    EXPECT_EQ(info.source, AMDSMI_CUID_SOURCE_DRIVER) << bdf_str;
+    EXPECT_EQ(std::string(info.derived), driver_value)
+        << bdf_str << ": amd-smi and the driver disagree about the derived CUID";
+    ++checked;
+  }
+
+  if (checked == 0) GTEST_SKIP() << "no device publishes cuid_derived";
+}
+
+TEST(GpuUnit, CuidDriverExpectationFollowsProcessorRenderNode) {
+  ScopedTempDir sysfs;
+  ASSERT_TRUE(sysfs.valid());
+  const std::string bdf = "0000:03:00.0";
+  const std::string pci = sysfs.path() + "/bus/pci/devices/" + bdf;
+  const std::string xcp = sysfs.path() + "/devices/platform/amdgpu_xcp.1";
+  ASSERT_TRUE(MakeDirs(pci + "/xcp"));
+  ASSERT_TRUE(MakeDirs(xcp + "/xcp"));
+  ASSERT_TRUE(MakeDirs(sysfs.path() + "/class/drm/renderD128"));
+  ASSERT_TRUE(MakeDirs(sysfs.path() + "/class/drm/renderD140"));
+  ASSERT_EQ(symlink(pci.c_str(), (sysfs.path() + "/class/drm/renderD128/device").c_str()), 0);
+  ASSERT_EQ(symlink(xcp.c_str(), (sysfs.path() + "/class/drm/renderD140/device").c_str()), 0);
+  const char* whole = "61ffe99a-b3e0-8e16-a802-4b1d515d5438";
+  const char* first = "73488f9e-ea52-86ce-8401-2627fa41b068";
+  const char* second = "3395667e-f8fa-840e-bc00-028dcc084280";
+  std::ofstream(pci + "/cuid_derived") << whole << '\n';
+  std::ofstream(pci + "/xcp/cuid_derived") << first << '\n';
+  std::ofstream(xcp + "/xcp/cuid_derived") << second << '\n';
+
+  // No profile-count gate: a single SPX partition is still its own component.
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 128, 0), first);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 128, kNoPartition), first);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 140, 1), second);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, kNoPartition, kNoPartition), whole);
+
+  // A present but empty publication must not silently select the parent.
+  std::ofstream(pci + "/xcp/cuid_derived", std::ios::trunc).close();
+  EXPECT_TRUE(DriverPublished(sysfs.path(), bdf, 128, 0).empty());
+  ASSERT_EQ(unlink((pci + "/xcp/cuid_derived").c_str()), 0);
+  ASSERT_EQ(unlink((xcp + "/xcp/cuid_derived").c_str()), 0);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 128, 0), whole);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 128, kNoPartition), whole);
+  EXPECT_TRUE(DriverPublished(sysfs.path(), bdf, 140, 1).empty());
+  EXPECT_TRUE(DriverPublished(sysfs.path(), bdf, kNoPartition, 1).empty());
+  ASSERT_EQ(rmdir((pci + "/xcp").c_str()), 0);
+  EXPECT_EQ(DriverPublished(sysfs.path(), bdf, 128, 0), whole);
+}
+
 TEST(GpuUnit, CuidSourceNamesTheStageThatAnswered) {
   if (!kCuidBuiltIn) GTEST_SKIP() << "built without CUID support";
 
@@ -402,10 +629,14 @@ TEST(GpuUnit, CuidSourceNamesTheStageThatAnswered) {
     ASSERT_EQ(status, AMDSMI_STATUS_SUCCESS) << bdf_str;
     ++answered;
 
-    // There is no node key, so every derived CUID is a temporary one this
-    // library computed.
-    EXPECT_EQ(info.source, AMDSMI_CUID_SOURCE_LIBRARY) << bdf_str;
-    EXPECT_NE(info.auxiliary, 0) << bdf_str;
+    EXPECT_NE(info.source, AMDSMI_CUID_SOURCE_UNKNOWN)
+        << bdf_str << ": a snapshot that succeeded should say which stage produced it";
+
+    // A non-UNKNOWN source alone would not catch false DRIVER attribution.
+    const bool driver_published = !DriverPublished(handle, bdf_str).empty();
+    EXPECT_EQ(info.source == AMDSMI_CUID_SOURCE_DRIVER, driver_published)
+        << bdf_str << ": source=" << static_cast<int>(info.source) << " while the driver "
+        << (driver_published ? "does" : "does not") << " publish cuid_derived";
   }
 
   if (answered == 0) GTEST_SKIP() << "no device reported a CUID";
@@ -469,10 +700,10 @@ class FabricatedPartition {
   std::unique_ptr<ScopedSysfsRoot> root_;
 };
 
-// In SPX the one partition is the whole GPU, so a partition with no CUID of its
-// own reports the GPU's, with the GPU's source and primary. In DPX and above it
-// has none. This series reads no cuid_derived, so a key-store kernel's
-// partition node is treated the same.
+// A partition's own driver CUID is what its handle reports, verbatim and as
+// DRIVER, in every mode. Without one, the one partition of a GPU in SPX is the
+// whole GPU and reports the GPU's CUID, source and primary; in DPX and above it
+// has none.
 TEST(GpuUnit, CuidPartitionNodeInSpxAndDpx) {
   if (!kCuidBuiltIn) GTEST_SKIP() << "built without CUID support";
 #ifndef AMDSMI_CUID_TEST_SYSFS_OVERRIDE
@@ -494,22 +725,26 @@ TEST(GpuUnit, CuidPartitionNodeInSpxAndDpx) {
 
   for (const bool derived : {false, true}) {
     SCOPED_TRACE(derived ? "key-store kernel" : "identity kernel");
-    {
-      const FabricatedPartition spx(handle, "SPX", "512", derived);
-      ASSERT_TRUE(spx.valid());
+    for (const auto& mode : {std::make_pair("SPX", "512"), std::make_pair("DPX", "256")}) {
+      SCOPED_TRACE(mode.first);
+      const FabricatedPartition partition(handle, mode.first, mode.second, derived);
+      ASSERT_TRUE(partition.valid());
       amdsmi_cuid_info_t info = {};
-      ASSERT_EQ(amdsmi_get_gpu_cuid_info(handle, &info), AMDSMI_STATUS_SUCCESS);
-      EXPECT_STREQ(info.derived, whole.derived);
-      EXPECT_STREQ(info.primary, whole.primary);
-      EXPECT_EQ(info.source, whole.source);
-      EXPECT_EQ(info.auxiliary, whole.auxiliary);
-    }
-    {
-      const FabricatedPartition dpx(handle, "DPX", "256", derived);
-      ASSERT_TRUE(dpx.valid());
-      amdsmi_cuid_info_t info = {};
-      EXPECT_EQ(amdsmi_get_gpu_cuid_info(handle, &info), AMDSMI_STATUS_NOT_SUPPORTED);
-      ExpectNoCuidReported(info);
+      const amdsmi_status_t status = amdsmi_get_gpu_cuid_info(handle, &info);
+      if (derived) {
+        ASSERT_EQ(status, AMDSMI_STATUS_SUCCESS);
+        EXPECT_STREQ(info.derived, FabricatedPartition::kPartitionCuid);
+        EXPECT_EQ(info.source, AMDSMI_CUID_SOURCE_DRIVER);
+      } else if (std::string(mode.first) == "SPX") {
+        ASSERT_EQ(status, AMDSMI_STATUS_SUCCESS);
+        EXPECT_STREQ(info.derived, whole.derived);
+        EXPECT_STREQ(info.primary, whole.primary);
+        EXPECT_EQ(info.source, whole.source);
+        EXPECT_EQ(info.auxiliary, whole.auxiliary);
+      } else {
+        EXPECT_EQ(status, AMDSMI_STATUS_NOT_SUPPORTED);
+        ExpectNoCuidReported(info);
+      }
     }
   }
 }
