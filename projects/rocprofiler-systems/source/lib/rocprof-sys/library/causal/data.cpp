@@ -124,11 +124,10 @@ get_filters(const std::set<binary::scope_filter::filter_scope>& _scopes = {
     // exclude internal libraries used by rocprof-sys
     if(_scopes.count(sf::BINARY_FILTER) > 0)
     {
-        _filters.emplace_back(sf{ .mode  = sf::FILTER_EXCLUDE,
-                                  .scope = sf::BINARY_FILTER,
-                                  .expression =
-                                      "lib(rocprof-sys[-\\.]|dyninst|"
-                                      "gotcha\\.|unwind\\.so\\.99)" });
+        _filters.emplace_back(sf{ .mode       = sf::FILTER_EXCLUDE,
+                                  .scope      = sf::BINARY_FILTER,
+                                  .expression = "lib(rocprof-sys[-\\.]|dyninst|"
+                                                "gotcha\\.|unwind\\.so\\.99)" });
     }
 
     // in function mode, it generally doesn't help to experiment on main function since
