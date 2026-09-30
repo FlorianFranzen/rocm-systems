@@ -48,6 +48,7 @@ set(SRC_LIST
     "${SRC_DIR}/amd_smi.cc"
     "${SRC_DIR}/fwupd_carveout.cc"
     "${SRC_DIR}/fwupd_carveout_parse.cc"
+    "${SRC_DIR}/amd_smi_addc.cc"
     "${SRC_DIR}/amd_smi_cper.cc"
     "${SRC_DIR}/amd_smi_common.cc"
     "${SRC_DIR}/amd_smi_drm.cc"
@@ -80,35 +81,6 @@ set(INC_LIST
     "${NIC_INCLUDES}"
 )
 
-set(RAS_DECODE "ras-decode")
-set(RAS_DECODE_REPO "git@github.amd.com:dctools/ras-decode-instinct-staging.git")
-set(RAS_DECODE_SRC_DIR "${PROJECT_SOURCE_DIR}/src/${RAS_DECODE}")
-set(RAS_DECODE_INC_DIR "${PROJECT_SOURCE_DIR}/include/${RAS_DECODE}")
-find_package(Git QUIET)
-if(GIT_FOUND)
-    add_custom_target(
-        ${RAS_DECODE}
-        COMMAND ${CMAKE_COMMAND} -E remove_directory ${CMAKE_CURRENT_BINARY_DIR}/${RAS_DECODE}
-        COMMAND ${GIT_EXECUTABLE} clone ${RAS_DECODE_REPO} -b main ${CMAKE_CURRENT_BINARY_DIR}/${RAS_DECODE}
-        COMMAND ${CMAKE_COMMAND} -E remove_directory ${RAS_DECODE_SRC_DIR}
-        COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_BINARY_DIR}/${RAS_DECODE}/src ${RAS_DECODE_SRC_DIR}
-        COMMAND ${CMAKE_COMMAND} -E remove_directory ${RAS_DECODE_INC_DIR}
-        COMMAND
-            ${CMAKE_COMMAND} -E copy_directory ${CMAKE_CURRENT_BINARY_DIR}/${RAS_DECODE}/include ${RAS_DECODE_INC_DIR}
-        WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
-        COMMENT "Cloning ${RAS_DECODE_REPO} from GitHub"
-        VERBATIM
-    )
-else()
-    message(WARNING "Git not found, cannot clone ${RAS_DECODE_REPO}.")
-endif()
-file(GLOB RAS_DECODE_INCLUDES "${RAS_DECODE_INC_DIR}/*.h")
-file(GLOB RAS_DECODE_SOURCES "${RAS_DECODE_SRC_DIR}/*.c")
-list(REMOVE_ITEM RAS_DECODE_SOURCES "main.c")
-
-set(SRC_LIST ${SRC_LIST} ${RAS_DECODE_SOURCES})
-set(INC_LIST ${INC_LIST} ${RAS_DECODE_INCLUDES})
-
 # Include UALOE library - always required
 set(UALOE_LIB "ualoe_lib")
 set(UALOE_LIB_SRC_DIR "${PROJECT_SOURCE_DIR}/src/${UALOE_LIB}")
@@ -116,6 +88,9 @@ set(UALOE_LIB_INC_DIR "${PROJECT_SOURCE_DIR}/include/${UALOE_LIB}")
 add_subdirectory("ualoe_lib")
 set(SRC_LIST ${SRC_LIST} ${UALOE_SOURCES})
 set(INC_LIST ${INC_LIST} ${UALOE_HEADERS})
+
+# addc-base decodes CPER records into AFIDs and the JSON event report
+add_subdirectory("${PROJECT_SOURCE_DIR}/third_party/addc-base" "${CMAKE_CURRENT_BINARY_DIR}/addc-base")
 
 if(ENABLE_ESMI_LIB)
     list(APPEND INC_LIST ${ESMI_INC_DIR}/e_smi/e_smi.h)
@@ -156,7 +131,7 @@ if(BUILD_BOTH_LIBS)
     add_library(${AMD_SMI} SHARED ${SRC_LIST} ${INC_LIST})
     add_library(${AMD_SMI}_static STATIC ${SRC_LIST} ${INC_LIST})
     set(AMD_SMI_TARGET ${AMD_SMI}_static PARENT_SCOPE)
-    set(AMD_SMI_EXPORT_TARGETS ${AMD_SMI} ${AMD_SMI}_static amdsminic PARENT_SCOPE)
+    set(AMD_SMI_EXPORT_TARGETS ${AMD_SMI} ${AMD_SMI}_static amdsminic addc_base PARENT_SCOPE)
     set(_AMD_SMI_ALL_TARGETS ${AMD_SMI} ${AMD_SMI}_static)
 else()
     add_library(${AMD_SMI} ${SRC_LIST} ${INC_LIST})
@@ -173,7 +148,7 @@ endif()
 function(amdsmi_configure_common_target _TARGET)
     target_link_libraries(
         ${_TARGET}
-        PRIVATE rt Threads::Threads ${CMAKE_DL_LIBS} amdsminic ${FILESYSTEM_LIB} ${UALOE_LINK_LIBRARIES}
+        PRIVATE rt Threads::Threads ${CMAKE_DL_LIBS} amdsminic addc_base ${FILESYSTEM_LIB} ${UALOE_LINK_LIBRARIES}
     )
 
     if(ENABLE_WSL_BACKEND)
@@ -197,7 +172,6 @@ function(amdsmi_configure_common_target _TARGET)
             ${CMAKE_CURRENT_SOURCE_DIR}/../
             ${PROJECT_SOURCE_DIR}/rocm_smi/include
             ${PROJECT_SOURCE_DIR}/common/shared_mutex
-            ${RAS_DECODE_INC_DIR}
             ${DRM_INCLUDE_DIRS}
             ${DRM_AMDGPU_INCLUDE_DIRS}
             ${NIC_INCLUDE_DIRS}
@@ -319,7 +293,8 @@ endif()
 ## Add the install directives for the runtime library.
 set(_INSTALL_TARGETS ${AMD_SMI} amdsminic)
 if(BUILD_BOTH_LIBS)
-    list(APPEND _INSTALL_TARGETS ${AMD_SMI}_static)
+    # Only the static library needs addc_base at link time; a shared library carries it.
+    list(APPEND _INSTALL_TARGETS ${AMD_SMI}_static addc_base)
 endif()
 install(
     TARGETS ${_INSTALL_TARGETS}
@@ -344,6 +319,7 @@ install(
 # both of amd_smi_cper.h's declarations).
 set(INSTALL_IMPL_HEADERS ${IMPL_HEADERS})
 list(FILTER INSTALL_IMPL_HEADERS EXCLUDE REGEX "_test")
+list(FILTER INSTALL_IMPL_HEADERS EXCLUDE REGEX "amd_smi_addc")
 list(FILTER INSTALL_IMPL_HEADERS EXCLUDE REGEX "amd_smi_container_id_parser")
 list(FILTER INSTALL_IMPL_HEADERS EXCLUDE REGEX "amd_smi_cper")
 list(FILTER INSTALL_IMPL_HEADERS EXCLUDE REGEX "amd_smi_wsl_device")

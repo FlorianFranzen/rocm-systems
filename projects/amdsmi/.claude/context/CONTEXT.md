@@ -128,3 +128,8 @@ Disambiguation: violation status (MI300+, time %) ≠ throttle_status (older gen
 
 Retired / reserved VRAM pages — "bad pages" and "retired pages" are the **same set**, same struct `amdsmi_retired_page_record_t` (amdsmi.h:1945-1958), via `amdsmi_get_gpu_bad_page_info()` / `amdsmi_get_gpu_memory_reserved_pages()`. State is the `amdsmi_memory_page_status_t` enum: **PENDING** (flagged, awaiting retirement window) → **RESERVED** (retired, unavailable) or **UNRESERVABLE** (failed). amd-smi reports address/size/status only — the **error class (CE vs UE) driving retirement is not captured or exposed** here; CE/UE counts live separately in `amdsmi_get_gpu_ecc_count()` (see docs/conceptual/ras.md).
 Disambiguation: bad pages ≡ retired pages (one set, status enum distinguishes pending/reserved/unreservable); error class is NOT part of it — use ECC count for CE/UE.
+
+### AFID
+
+AMD Field ID: an XID-like integer generated from a CPER record so errors map to a service action (Confluence AMDSMI "Query RAS CPER"). `amdsmi_get_afids_from_cper()` returns one AFID per **decoded event**; an event with no more specific classification yields **16999**. Not per CPER section: the old ras-decode path emitted one per section and dropped undecodable ones.
+Disambiguation: AFID (event classification) ≠ FRU (the replaceable part named alongside it, `fru_id`/`fru_text` in addc).

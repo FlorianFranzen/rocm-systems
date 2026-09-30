@@ -114,6 +114,7 @@ endif()
 target_link_libraries(
     ${TEST}
     ${AMD_SMI_TARGET}
+    addc_base
     GTest::gtest
     c
     stdc++
