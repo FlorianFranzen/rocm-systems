@@ -2599,13 +2599,15 @@ static ncclResult_t initTransportsRank(struct ncclComm* comm, struct ncclComm* p
   // (globalRmaProxySupport) has no all-P2P symmetric window, and enqueue.cc has a
   // dedicated non-symmetric hostRma path for it. The numRmaCtx gate is upstream 2.31's.
   comm->hostRmaSupport = comm->config.numRmaCtx > 0 && (isOneLsaTeams || comm->globalRmaProxySupport);
-  if (!comm->symmetricSupport || comm->globalGinSupport == NCCL_GIN_CONNECTION_NONE) {
-    INFO(NCCL_INIT,
-         "symmetricSupport %d, cuMemEnable %d, globalGinSupport %d, globalNicFused %d, cuMemGdrSupport %d, "
-         "contiguousRanksPerHost %d, crossNicSupport %d",
-         comm->symmetricSupport, ncclCuMemEnable(), comm->globalGinSupport, globalNicFused, globalCuMemGdrSupport,
-         comm->contiguousRanksPerHost, globalCrossNicSupport);
-  }
+  // Every input to both derivations, in one unconditional line. This replaces the
+  // conditional block that used to print a subset only once something was already
+  // missing, which is why a run that lost the RMA proxy left no trace naming why.
+  INFO(NCCL_INIT | NCCL_NET,
+       "GIN/RMA support: ginConnection %d hostRma %d symmetric %d (ginTypeMask 0x%lx mloPart %d nicFused %d "
+       "crossNic %d railable %d rmaPlugin %d cuMemGdr %d cuMemEnable %d oneLsaTeam %d numRmaCtx %d)",
+       comm->globalGinSupport, comm->hostRmaSupport, comm->symmetricSupport, (unsigned long)globalGinTypeBitMask,
+       comm->hasMloPart, globalNicFused, globalCrossNicSupport, comm->contiguousRanksPerHost != INT_MAX,
+       globalRmaPluginSupport, globalCuMemGdrSupport, ncclCuMemEnable(), isOneLsaTeams, comm->config.numRmaCtx);
 
   comm->ceColl.baseUCSymReadyPtr = NULL;
   comm->ceColl.baseUCSymComplPtr = NULL;
